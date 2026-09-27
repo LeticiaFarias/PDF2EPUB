@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<title>PDF → EPUB</title>
+<link rel="stylesheet" href="css/app.css" />
+</head>
+<body>
+<div class="page">
+
+  <header class="hero">
+    <span class="hero-mark">Pdf</span><span class="hero-arrow">→</span><span class="hero-mark accent">Epub</span>
+    <h1>Conversor de novels: PDF para EPUB</h1>
+    <p class="hero-sub">Roda no seu navegador. Só sai da sua máquina o que você mandar (e só se você escolher revisar com uma IA externa).</p>
+  </header>
+
+  <section class="card" id="uploadSection">
+    <h2><span class="step">1</span> Escolha o PDF</h2>
+    <div class="dropzone" id="dropZone">
+      <input type="file" id="fileInput" accept="application/pdf" />
+      <p>Arraste o PDF aqui ou clique para escolher</p>
+      <p class="file-name" id="fileName"></p>
+    </div>
+  </section>
+
+  <section class="card" id="optionsSection" hidden>
+    <h2><span class="step">2</span> Opções</h2>
+
+    <div class="field-grid">
+      <label class="field">
+        <span>Título do livro</span>
+        <input type="text" id="bookTitle" />
+      </label>
+      <label class="field">
+        <span>Autor(a) / tradutor(a)</span>
+        <input type="text" id="bookAuthor" placeholder="Opcional" />
+      </label>
+    </div>
+
+    <div class="field-grid">
+      <label class="field">
+        <span>Fonte do texto</span>
+        <select id="fontFamily">
+          <option value="serif">Serif clássica (recomendado)</option>
+          <option value="serif-alt">Serif alternativa</option>
+          <option value="sans">Sem serifa</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Tamanho da fonte</span>
+        <select id="fontSize">
+          <option value="0.9">Pequena</option>
+          <option value="1" selected>Média</option>
+          <option value="1.15">Grande</option>
+          <option value="1.3">Extra grande</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Espaçamento entre linhas</span>
+        <select id="lineHeight">
+          <option value="1.3">Compacto</option>
+          <option value="1.45" selected>Normal</option>
+          <option value="1.65">Arejado</option>
+        </select>
+      </label>
+    </div>
+
+    <p class="hint">
+      Essas opções definem a aparência padrão do EPUB gerado — e continuam ajustáveis depois,
+      normalmente, no próprio Kindle ou leitor.
+    </p>
+
+    <div class="field-row">
+      <label class="checkbox">
+        <input type="checkbox" id="justify" checked />
+        <span>Justificar o texto</span>
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" id="detectChapters" checked />
+        <span>Detectar capítulos automaticamente</span>
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" id="ocrToggle" checked />
+        <span>Usar OCR em páginas escaneadas (sem texto selecionável)</span>
+      </label>
+    </div>
+
+    <hr class="divider" />
+
+    <h3>Capa</h3>
+    <div class="cover-picker">
+      <div class="cover-preview" id="coverPreviewBox">
+        <img id="coverPreviewImg" alt="Prévia da capa" hidden />
+        <span id="coverPreviewEmpty">Sem prévia ainda</span>
+      </div>
+      <div class="cover-options">
+        <label class="radio">
+          <input type="radio" name="coverSource" value="detected" checked />
+          <span>Usar a 1ª página do PDF como capa (detectado automaticamente)</span>
+        </label>
+        <label class="radio">
+          <input type="radio" name="coverSource" value="upload" />
+          <span>Enviar minha própria imagem de capa</span>
+        </label>
+        <input type="file" id="coverFileInput" accept="image/*" hidden />
+        <label class="radio">
+          <input type="radio" name="coverSource" value="none" />
+          <span>Sem capa</span>
+        </label>
+      </div>
+    </div>
+
+    <hr class="divider" />
+
+    <h3>Revisão de texto com IA <span class="optional-tag">opcional</span></h3>
+    <div class="ai-picker">
+      <label class="radio">
+        <input type="radio" name="aiMode" value="none" checked />
+        <span>Nenhuma — só a limpeza automática (grátis, instantânea)</span>
+      </label>
+      <label class="radio">
+        <input type="radio" name="aiMode" value="local" />
+        <span>IA gratuita integrada — roda no navegador, sem login (baixa um modelo na 1ª vez, mais lenta)</span>
+      </label>
+      <label class="radio">
+        <input type="radio" name="aiMode" value="custom" />
+        <span>Minha IA — uso minha própria chave de API (mais rápida e melhor qualidade)</span>
+      </label>
+    </div>
+
+    <div class="ai-custom-fields" id="aiCustomFields" hidden>
+      <div class="field-grid">
+        <label class="field">
+          <span>Provedor</span>
+          <select id="aiProvider">
+            <option value="openai">OpenAI (GPT)</option>
+            <option value="gemini">Google Gemini</option>
+            <option value="deepseek">DeepSeek</option>
+            <option value="anthropic">Anthropic Claude</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Modelo</span>
+          <input type="text" id="aiModel" placeholder="Deixe em branco para usar o padrão" />
+        </label>
+      </div>
+      <label class="field">
+        <span>Chave de API</span>
+        <input type="password" id="aiApiKey" placeholder="Colada aqui, fica só no seu navegador" />
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" id="aiRememberKey" />
+        <span>Lembrar minha chave neste navegador</span>
+      </label>
+      <p class="hint warn">
+        Com essa opção, os trechos revisados são enviados ao servidor do provedor escolhido.
+        Não use se o conteúdo for sensível.
+      </p>
+    </div>
+
+    <div class="ai-scope" id="aiScopeFields" hidden>
+      <label class="checkbox">
+        <input type="checkbox" id="aiApplyOcr" checked />
+        <span>Aprimorar páginas escaneadas (OCR) com IA</span>
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" id="aiApplyAll" />
+        <span>Revisar também o texto extraído normalmente (não só OCR)</span>
+      </label>
+    </div>
+
+    <button class="btn primary" id="processBtn">Processar PDF</button>
+  </section>
+
+  <section class="card" id="progressSection" hidden>
+    <h2><span class="step">3</span> Processando</h2>
+    <div class="progress-track"><div class="progress-fill" id="progressBar"></div></div>
+    <div class="log-status" id="aiStatusLine"></div>
+    <div class="log" id="progressLog"></div>
+  </section>
+
+  <section class="card" id="previewSection" hidden>
+    <h2><span class="step">4</span> Revise o texto</h2>
+    <p class="hint">
+      A limpeza automática já juntou linhas quebradas e separou os parágrafos. Aproveite para
+      corrigir manualmente algum trecho que o OCR ou a IA tenham deixado torto — deixe uma
+      linha em branco entre parágrafos.
+    </p>
+    <div id="chaptersContainer"></div>
+    <button class="btn primary" id="buildBtn">Gerar EPUB</button>
+  </section>
+
+  <section class="card" id="downloadSection" hidden>
+    <h2>Pronto</h2>
+    <p>Seu EPUB foi gerado: <strong id="finalFileName"></strong></p>
+    <a class="btn primary" id="downloadLink">Baixar EPUB</a>
+    <p class="hint">Transfira o arquivo para o Kindle pelo cabo USB, pelo app Kindle ou enviando por e-mail para o seu endereço @kindle.com.</p>
+  </section>
+
+</div>
+
+<script src="js/vendor/pdf.min.js"></script>
+<script src="js/vendor/jszip.min.js"></script>
+<script src="js/vendor/tesseract.min.js"></script>
+<script src="js/textCleaner.js"></script>
+<script src="js/epubBuilder.js"></script>
+<script src="js/coverDetector.js"></script>
+<script src="js/aiProviders.js"></script>
+<script src="js/aiLocal.js"></script>
+<script src="js/aiReviewer.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
