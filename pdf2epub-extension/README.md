@@ -37,9 +37,9 @@ Três modos, escolhidos na etapa de opções:
 
 1. **Nenhuma** — só a limpeza automática por regras (padrão, grátis, instantânea).
 2. **IA gratuita integrada** — um modelo pequeno (Qwen2.5-0.5B) roda dentro do
-   próprio navegador via WebAssembly/WebGPU. Não pede login nem chave. Na
-   primeira vez que é usada, baixa o motor e o modelo de CDNs públicas
-   (jsDelivr e Hugging Face) — isso precisa de internet uma vez; depois fica
+   próprio navegador via WebAssembly. Não pede login nem chave. O motor vem
+   junto com a extensão; na primeira vez que é usada, baixa só os pesos do
+   modelo do Hugging Face — isso precisa de internet uma vez; depois fica
    em cache e funciona offline. É mais lenta e tem qualidade mais simples
    que os provedores pagos abaixo — boa para corrigir espaçamento, pontuação
    e resíduos de OCR, não para revisão literária sofisticada.

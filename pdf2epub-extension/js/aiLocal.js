@@ -5,11 +5,15 @@
  * rodando inteiramente no navegador via transformers.js/ONNX Runtime Web,
  * sem login, sem chave de API e sem custo.
  *
+ * O motor (onnxruntime-web) vem empacotado na extensão, em
+ * js/vendor/ort/: o Manifest V3 proíbe carregar código JavaScript remoto,
+ * então os caminhos do wasm são apontados explicitamente para arquivos
+ * locais em vez da CDN padrão do transformers.js.
+ *
  * Duas ressalvas importantes, mostradas também na interface:
- *  1) Na primeira vez que essa opção é usada, o navegador baixa o motor
- *     (onnxruntime-web) e os pesos do modelo de CDNs públicas (jsDelivr e
- *     Hugging Face) — isso exige internet nessa primeira vez. Depois fica
- *     em cache e funciona sem rede.
+ *  1) Na primeira vez que essa opção é usada, o navegador baixa os pesos
+ *     do modelo do Hugging Face (só dados, via fetch) — isso exige
+ *     internet nessa primeira vez. Depois fica em cache e funciona sem rede.
  *  2) É um modelo pequeno: bom para corrigir espaçamento, pontuação e
  *     resíduos de OCR, mas não tem a qualidade de um GPT/Gemini/Claude
  *     "grande". Para revisão mais sofisticada, use a opção de API própria.
@@ -18,6 +22,11 @@
 const AiLocal = (() => {
   const MODEL_ID = "onnx-community/Qwen2.5-0.5B-Instruct";
   const LIB_URL = chrome.runtime.getURL("js/vendor/transformers.web.min.js");
+  const ORT_WASM_PATHS = {
+    mjs: chrome.runtime.getURL("js/vendor/ort/ort-wasm-simd-threaded.asyncify.mjs"),
+    wasm: chrome.runtime.getURL("js/vendor/ort/ort-wasm-simd-threaded.asyncify.wasm"),
+  };
+  const MAX_NEW_TOKENS_CAP = 4096;
 
   let generatorPromise = null;
 
@@ -29,7 +38,17 @@ const AiLocal = (() => {
     if (generatorPromise) return generatorPromise;
 
     generatorPromise = (async () => {
-      const { pipeline } = await import(LIB_URL);
+      const { pipeline, env } = await import(LIB_URL);
+
+      // MV3 bloqueia import de script remoto: o runtime wasm precisa vir
+      // dos arquivos vendorizados na extensão, não da jsDelivr.
+      env.allowLocalModels = false;
+      env.allowRemoteModels = true;
+      const wasmEnv = env.backends.onnx.wasm;
+      wasmEnv.wasmPaths = ORT_WASM_PATHS;
+      wasmEnv.proxy = false;
+      if (!self.crossOriginIsolated) wasmEnv.numThreads = 1;
+
       const device = pickDevice();
       const dtype = device === "webgpu" ? "q4f16" : "q4";
 
@@ -84,7 +103,10 @@ const AiLocal = (() => {
       { role: "user", content: userText },
     ];
     const output = await generator(messages, {
-      max_new_tokens: Math.min(1024, Math.ceil(userText.length * 1.3)),
+      // A revisão preserva o volume do texto, então a saída tem tamanho
+      // parecido com a entrada: estimamos por caractere (~3 chars/token em
+      // PT-BR) com folga generosa para não truncar parágrafos.
+      max_new_tokens: Math.min(MAX_NEW_TOKENS_CAP, Math.ceil((userText.length / 3) * 2) + 256),
       temperature: 0.2,
       do_sample: false,
     });

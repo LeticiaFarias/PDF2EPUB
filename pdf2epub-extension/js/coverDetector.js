@@ -27,6 +27,28 @@ const CoverDetector = (() => {
     return { blob, mimeType: "image/jpeg", dataUrl, extension: "jpg" };
   }
 
+  // O subtipo do MIME nem sempre serve como extensão ("image/svg+xml"
+  // viraria "svg+xml"), então os tipos conhecidos são mapeados na mão.
+  const EXTENSION_BY_MIME = {
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/png": "png",
+    "image/gif": "gif",
+    "image/webp": "webp",
+    "image/svg+xml": "svg",
+    "image/avif": "avif",
+    "image/bmp": "bmp",
+    "image/tiff": "tiff",
+  };
+
+  function extensionFor(file) {
+    const mime = (file.type || "").toLowerCase();
+    if (EXTENSION_BY_MIME[mime]) return EXTENSION_BY_MIME[mime];
+    const fromName = (file.name || "").toLowerCase().match(/\.([a-z0-9]+)$/);
+    if (fromName) return fromName[1] === "jpeg" ? "jpg" : fromName[1];
+    return "jpg";
+  }
+
   async function fromUploadedFile(file) {
     const dataUrl = await new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -34,7 +56,7 @@ const CoverDetector = (() => {
       reader.onerror = reject;
       reader.readAsDataURL(file);
     });
-    const extension = (file.type.split("/")[1] || "jpg").replace("jpeg", "jpg");
+    const extension = extensionFor(file);
     return { blob: file, mimeType: file.type || "image/jpeg", dataUrl, extension };
   }
 

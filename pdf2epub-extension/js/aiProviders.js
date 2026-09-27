@@ -16,7 +16,7 @@
 const AiProviders = (() => {
   const DEFAULTS = {
     openai: { model: "gpt-4o-mini", label: "OpenAI (GPT)" },
-    gemini: { model: "gemini-2.5-flash", label: "Google Gemini" },
+    gemini: { model: "gemini-flash-latest", label: "Google Gemini" },
     deepseek: { model: "deepseek-chat", label: "DeepSeek" },
     anthropic: { model: "claude-haiku-4-5-20251001", label: "Anthropic Claude" },
   };
@@ -107,7 +107,38 @@ const AiProviders = (() => {
     }
   }
 
-  async function callExternalAI(provider, apiKey, model, systemPrompt, userText) {
+  const MAX_ATTEMPTS = 4;
+  const BASE_DELAY_MS = 1000;
+
+  function isTransientStatus(status) {
+    return status === 408 || status === 429 || status >= 500;
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function retryDelayMs(attempt, retryAfterHeader) {
+    const retryAfter = Number.parseFloat(retryAfterHeader || "");
+    if (Number.isFinite(retryAfter) && retryAfter > 0) return Math.min(retryAfter * 1000, 30000);
+    const backoff = BASE_DELAY_MS * 2 ** (attempt - 1);
+    return Math.min(backoff, 30000) + Math.random() * 250;
+  }
+
+  async function readErrorDetail(res) {
+    try {
+      const errJson = await res.json();
+      return errJson.error?.message || errJson.message || JSON.stringify(errJson);
+    } catch {
+      try {
+        return await res.text();
+      } catch {
+        return res.statusText;
+      }
+    }
+  }
+
+  async function callExternalAI(provider, apiKey, model, systemPrompt, userText, onProgress) {
     const { url, headers, body } = buildRequest(
       provider,
       apiKey,
@@ -115,28 +146,43 @@ const AiProviders = (() => {
       systemPrompt,
       userText
     );
+    const label = DEFAULTS[provider].label;
 
-    const res = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-    });
-
-    if (!res.ok) {
-      let detail = "";
+    for (let attempt = 1; ; attempt++) {
+      let res;
       try {
-        const errJson = await res.json();
-        detail = errJson.error?.message || errJson.message || JSON.stringify(errJson);
-      } catch {
-        detail = await res.text();
+        res = await fetch(url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+        });
+      } catch (err) {
+        // Falha de rede (offline, DNS, timeout): também vale tentar de novo.
+        if (attempt >= MAX_ATTEMPTS) throw new Error(`${label}: falha de rede (${err.message}).`);
+        const delay = retryDelayMs(attempt);
+        onProgress?.(`${label}: falha de rede, tentando de novo em ${Math.round(delay / 1000)}s…`);
+        await sleep(delay);
+        continue;
       }
-      throw new Error(`${DEFAULTS[provider].label} respondeu ${res.status}: ${detail}`);
-    }
 
-    const json = await res.json();
-    const text = extractText(provider, json);
-    if (!text.trim()) throw new Error(`${DEFAULTS[provider].label} devolveu uma resposta vazia.`);
-    return text.trim();
+      if (!res.ok) {
+        const detail = await readErrorDetail(res);
+        if (isTransientStatus(res.status) && attempt < MAX_ATTEMPTS) {
+          const delay = retryDelayMs(attempt, res.headers.get("retry-after"));
+          onProgress?.(
+            `${label} respondeu ${res.status}; nova tentativa em ${Math.round(delay / 1000)}s (${attempt}/${MAX_ATTEMPTS - 1})…`
+          );
+          await sleep(delay);
+          continue;
+        }
+        throw new Error(`${label} respondeu ${res.status}: ${detail}`);
+      }
+
+      const json = await res.json();
+      const text = extractText(provider, json);
+      if (!text.trim()) throw new Error(`${label} devolveu uma resposta vazia.`);
+      return text.trim();
+    }
   }
 
   return { callExternalAI, DEFAULTS };
