@@ -34,8 +34,18 @@ const TextCleaner = (() => {
     /^extra\s*[\divxlc]*$/i,
   ];
 
-  // Linha "solta" que é só um número de página, geralmente lixo de rodapé.
-  const PAGE_NUMBER_LINE = /^\s*[\divxlc]{1,4}\s*$/i;
+  // Linha "solta" que é só um número de página, geralmente lixo de rodapé:
+  // ou dígitos (até 4), ou um algarismo romano bem-formado, opcionalmente
+  // entre traços/pontos ("- 12 -", "• iv •"). Qualquer outra coisa é
+  // tratada como conteúdo legítimo.
+  // Romanos só até CCCXCIX: numeração romana de livro é de pré-texto e
+  // não chega perto disso, enquanto algo como "MDCCLXXVI" costuma ser um
+  // ano (conteúdo legítimo).
+  const ROMAN_NUMERAL = "c{0,3}(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})";
+  const PAGE_NUMBER_LINE = new RegExp(
+    `^\\s*[-–—•.\\[(]*\\s*(?:\\d{1,4}|(?=[mdclxvi])${ROMAN_NUMERAL})\\s*[-–—•.\\])]*\\s*$`,
+    "i"
+  );
 
   const SENTENCE_END = /[.!?…”"»›)\]]\s*$/;
 
@@ -48,8 +58,8 @@ const TextCleaner = (() => {
   function isLikelyPageArtifact(line) {
     const t = line.trim();
     if (!t) return true;
-    if (PAGE_NUMBER_LINE.test(t)) return true;
-    return false;
+    if (t.length > 12) return false;
+    return PAGE_NUMBER_LINE.test(t);
   }
 
   function normalizeSpacing(text) {

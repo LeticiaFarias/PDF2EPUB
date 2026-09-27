@@ -46,7 +46,12 @@ let selectedFile = null;
 let currentPdf = null; // documento pdf.js já carregado, reaproveitado entre capa e extração
 let detectedCover = null; // {blob, mimeType, dataUrl, extension}
 let uploadedCover = null;
-let ocrWorker = null;
+let ocrWorkers = [];
+
+// Falha ao carregar o próprio motor de OCR (arquivos ausentes em
+// js/vendor ou tessdata): diferente de uma página que não pôde ser lida,
+// isso inviabiliza o processamento inteiro.
+class OcrEngineError extends Error {}
 
 // ---------------------------------------------------------------- helpers
 
@@ -63,6 +68,12 @@ function setAiStatus(msg) {
 
 function setProgress(fraction) {
   els.progressBar.style.width = `${Math.round(fraction * 100)}%`;
+}
+
+function formatDuration(seconds) {
+  const total = Math.max(1, Math.round(seconds));
+  if (total < 60) return `${total}s`;
+  return `${Math.floor(total / 60)}min ${String(total % 60).padStart(2, "0")}s`;
 }
 
 function guessTitleFromFileName(name) {
@@ -141,7 +152,23 @@ loadSavedAiSettings();
 
 async function loadPdf(file) {
   const buffer = await file.arrayBuffer();
-  return pdfjsLib.getDocument({ data: buffer }).promise;
+  const task = pdfjsLib.getDocument({ data: buffer });
+  // PDFs criptografados: pedimos a senha à usuária em vez de deixar o
+  // pdf.js falhar com um erro genérico.
+  task.onPassword = (updatePassword, reason) => {
+    const again = reason === pdfjsLib.PasswordResponses.INCORRECT_PASSWORD;
+    const password = prompt(
+      again
+        ? "Senha incorreta. Digite a senha do PDF:"
+        : "Este PDF está protegido por senha. Digite a senha para abrir:"
+    );
+    if (password === null) {
+      task.destroy();
+      return;
+    }
+    updatePassword(password);
+  };
+  return task.promise;
 }
 
 async function detectAndShowCover() {
@@ -215,12 +242,18 @@ async function handleFile(file) {
   showCoverPreview(null);
   els.optionsSection.scrollIntoView({ behavior: "smooth", block: "start" });
 
+  currentPdf = null;
   try {
     currentPdf = await loadPdf(file);
     await detectAndShowCover();
   } catch (err) {
     console.error(err);
-    alert("Não foi possível abrir o PDF: " + err.message);
+    const isPasswordIssue = err?.name === "PasswordException";
+    alert(
+      isPasswordIssue
+        ? "Este PDF está protegido por senha e não pôde ser aberto. Remova a proteção (ou informe a senha correta) e tente de novo."
+        : "Não foi possível abrir o PDF: " + err.message
+    );
   }
 }
 
@@ -247,6 +280,33 @@ els.dropZone.addEventListener("drop", (e) => {
 
 // -------------------------------------------------------- PDF text/OCR
 
+// Junta os itens de texto de uma linha inserindo espaço quando o PDF não
+// o traz explicitamente: itens vizinhos costumam ser fragmentos da mesma
+// palavra (sem espaço), mas um salto horizontal relevante entre eles
+// significa tabulação, coluna ou espaço de verdade.
+function joinLineItems(parts) {
+  let line = "";
+  let prev = null;
+
+  for (const { str, item } of parts) {
+    if (!str) {
+      prev = item;
+      continue;
+    }
+    if (line) {
+      const endsWithSpace = /\s$/.test(line);
+      const startsWithSpace = /^\s/.test(str);
+      const prevEnd = prev ? prev.transform[4] + (prev.width || 0) : null;
+      const gap = prevEnd !== null ? item.transform[4] - prevEnd : 0;
+      const spaceWidth = (item.height || 10) * 0.25;
+      if (!endsWithSpace && !startsWithSpace && gap > spaceWidth) line += " ";
+    }
+    line += str;
+    prev = item;
+  }
+  return line;
+}
+
 function groupItemsIntoLines(items) {
   const lines = [];
   let currentY = null;
@@ -255,95 +315,211 @@ function groupItemsIntoLines(items) {
   for (const item of items) {
     const y = Math.round(item.transform[5]);
     if (currentY === null || Math.abs(y - currentY) > 2) {
-      if (currentLine.length) lines.push(currentLine.join(""));
+      if (currentLine.length) lines.push(joinLineItems(currentLine));
       currentLine = [];
       currentY = y;
     }
-    currentLine.push(item.str);
+    currentLine.push({ str: item.str, item });
     if (item.hasEOL) {
-      lines.push(currentLine.join(""));
+      lines.push(joinLineItems(currentLine));
       currentLine = [];
       currentY = null;
     }
   }
-  if (currentLine.length) lines.push(currentLine.join(""));
+  if (currentLine.length) lines.push(joinLineItems(currentLine));
   return lines;
 }
 
-async function getOcrWorker() {
-  if (ocrWorker) return ocrWorker;
-  log("Carregando motor de OCR (primeira vez pode levar alguns segundos)…");
-  ocrWorker = await Tesseract.createWorker("por", 1, {
-    workerPath: chrome.runtime.getURL("js/vendor/worker.min.js"),
-    corePath: chrome.runtime.getURL("js/vendor/tesseract-core-simd-lstm.js"),
-    langPath: chrome.runtime.getURL("tessdata/"),
-    gzip: true,
-  });
-  return ocrWorker;
+// Escala de renderização para OCR: mira ~2000px de largura, que é o
+// suficiente para o Tesseract ler texto de livro, sem gastar memória e
+// tempo renderizando páginas gigantes.
+const OCR_TARGET_WIDTH = 2000;
+const OCR_MIN_SCALE = 1.2;
+const OCR_MAX_SCALE = 2.2;
+const OCR_MAX_WORKERS = 4;
+
+function ocrScaleFor(page) {
+  const base = page.getViewport({ scale: 1 });
+  const scale = OCR_TARGET_WIDTH / base.width;
+  return Math.min(OCR_MAX_SCALE, Math.max(OCR_MIN_SCALE, scale));
 }
 
-async function ocrPage(page) {
-  const viewport = page.getViewport({ scale: 2.2 });
+async function createOcrWorker() {
+  if (typeof Tesseract === "undefined" || !Tesseract.createWorker) {
+    throw new OcrEngineError("a biblioteca tesseract.js não foi carregada");
+  }
+  try {
+    return await Tesseract.createWorker("por", 1, {
+      workerPath: chrome.runtime.getURL("js/vendor/worker.min.js"),
+      corePath: chrome.runtime.getURL("js/vendor/tesseract-core-simd-lstm.js"),
+      langPath: chrome.runtime.getURL("tessdata/"),
+      gzip: true,
+    });
+  } catch (err) {
+    throw new OcrEngineError(err.message);
+  }
+}
+
+async function getOcrPool(size) {
+  if (ocrWorkers.length >= size) return ocrWorkers.slice(0, size);
+  log(`Carregando motor de OCR (${size} processo(s) em paralelo; a primeira vez leva alguns segundos)…`);
+  const created = await Promise.all(
+    Array.from({ length: size - ocrWorkers.length }, () => createOcrWorker())
+  );
+  ocrWorkers = ocrWorkers.concat(created);
+  return ocrWorkers;
+}
+
+async function terminateOcrPool() {
+  const workers = ocrWorkers;
+  ocrWorkers = [];
+  await Promise.all(
+    workers.map((worker) => worker.terminate().catch((err) => console.warn("OCR terminate:", err)))
+  );
+}
+
+async function renderPageToCanvas(page, scale) {
+  const viewport = page.getViewport({ scale });
   const canvas = document.createElement("canvas");
-  canvas.width = viewport.width;
-  canvas.height = viewport.height;
-  const ctx = canvas.getContext("2d");
+  canvas.width = Math.round(viewport.width);
+  canvas.height = Math.round(viewport.height);
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
   await page.render({ canvasContext: ctx, viewport }).promise;
-  const worker = await getOcrWorker();
-  const { data } = await worker.recognize(canvas);
-  return data.text;
+  return canvas;
+}
+
+function poolSizeFor(pageCount) {
+  const cores = navigator.hardwareConcurrency || 2;
+  return Math.max(1, Math.min(OCR_MAX_WORKERS, pageCount, Math.floor(cores / 2) || 1));
+}
+
+/**
+ * Roda OCR nas páginas indicadas usando vários workers em paralelo.
+ * Uma falha em uma página específica é registrada e a página fica sem
+ * texto; uma falha ao criar o motor (OcrEngineError) interrompe tudo.
+ */
+async function ocrPages(pdf, pageNumbers) {
+  const workers = await getOcrPool(poolSizeFor(pageNumbers.length));
+  const texts = new Map();
+  const failed = [];
+  const startedAt = performance.now();
+  let done = 0;
+  let next = 0;
+
+  await Promise.all(
+    workers.map(async (worker) => {
+      while (next < pageNumbers.length) {
+        const pageNumber = pageNumbers[next++];
+        try {
+          const page = await pdf.getPage(pageNumber);
+          const canvas = await renderPageToCanvas(page, ocrScaleFor(page));
+          const { data } = await worker.recognize(canvas);
+          texts.set(pageNumber, data.text);
+          canvas.width = 0;
+          canvas.height = 0;
+        } catch (err) {
+          failed.push(pageNumber);
+          log(`Página ${pageNumber}: falha no OCR (${err.message}).`);
+        }
+        done += 1;
+        const elapsed = (performance.now() - startedAt) / 1000;
+        const remaining = (elapsed / done) * (pageNumbers.length - done);
+        log(
+          `OCR ${done}/${pageNumbers.length} página(s)` +
+            (done < pageNumbers.length ? ` — restam ~${formatDuration(remaining)}.` : ".")
+        );
+      }
+    })
+  );
+
+  return { texts, failed };
 }
 
 async function extractPdfText(pdf, options, aiHelpers) {
   const numPages = pdf.numPages;
   const pagesText = [];
-  let ocrPagesUsed = 0;
+  const needsOcr = [];
 
   for (let i = 1; i <= numPages; i++) {
     const page = await pdf.getPage(i);
     const textContent = await page.getTextContent();
-    let pageText = groupItemsIntoLines(textContent.items).join("\n").trim();
-    let wasOcr = false;
+    const pageText = groupItemsIntoLines(textContent.items).join("\n").trim();
+    pagesText.push(pageText);
+    if (options.ocrEnabled && pageText.replace(/\s/g, "").length < 25) needsOcr.push(i);
+    setProgress((i / numPages) * (options.ocrEnabled ? 0.3 : 1));
+  }
 
-    if (options.ocrEnabled && pageText.replace(/\s/g, "").length < 25) {
-      log(`Página ${i}/${numPages}: pouco texto extraído, aplicando OCR…`);
-      try {
-        pageText = await ocrPage(page);
-        ocrPagesUsed += 1;
-        wasOcr = true;
-      } catch (err) {
-        log(`Página ${i}: falha no OCR (${err.message}). Seguindo sem ela.`);
-      }
-    } else {
-      log(`Página ${i}/${numPages} processada.`);
+  log(
+    needsOcr.length
+      ? `${numPages} página(s) lidas; ${needsOcr.length} sem texto selecionável vão passar por OCR.`
+      : `${numPages} página(s) lidas como texto.`
+  );
+
+  const ocrPageNumbers = [];
+  if (needsOcr.length) {
+    const { texts, failed } = await ocrPages(pdf, needsOcr);
+    for (const [pageNumber, text] of texts) {
+      pagesText[pageNumber - 1] = text;
+      ocrPageNumbers.push(pageNumber);
     }
+    if (failed.length) log(`${failed.length} página(s) ficaram sem texto após o OCR.`);
+    setProgress(0.85);
+  }
 
-    if (wasOcr && options.aiApplyOcr && aiHelpers) {
+  // Cada página passa pela IA no máximo uma vez: as de OCR com o prompt
+  // de OCR, as demais (só quando "revisar tudo" está marcado) com o
+  // prompt geral.
+  const isOcrPage = new Set(ocrPageNumbers);
+  const toReview = [];
+  for (let pageNumber = 1; pageNumber <= numPages; pageNumber++) {
+    if (!pagesText[pageNumber - 1].trim()) continue;
+    if (isOcrPage.has(pageNumber)) {
+      if (options.aiApplyOcr) toReview.push({ pageNumber, kind: "ocr" });
+    } else if (options.aiApplyAll) {
+      toReview.push({ pageNumber, kind: "general" });
+    }
+  }
+
+  if (aiHelpers && toReview.length) {
+    for (let i = 0; i < toReview.length; i++) {
+      const { pageNumber, kind } = toReview[i];
+      log(`Revisando com IA a página ${pageNumber} (${i + 1}/${toReview.length})…`);
       try {
-        pageText = await aiHelpers.reviewText(pageText, "ocr", options.aiConfig, setAiStatus);
+        pagesText[pageNumber - 1] = await aiHelpers.reviewText(
+          pagesText[pageNumber - 1],
+          kind,
+          options.aiConfig,
+          setAiStatus
+        );
       } catch (err) {
-        log(`Página ${i}: revisão por IA falhou (${err.message}).`);
+        log(`Página ${pageNumber}: revisão por IA falhou (${err.message}).`);
       } finally {
         setAiStatus("");
       }
+      setProgress(0.85 + (0.15 * (i + 1)) / toReview.length);
     }
-
-    pagesText.push(pageText);
-    setProgress(i / numPages);
   }
 
-  if (ocrWorker) {
-    await ocrWorker.terminate();
-    ocrWorker = null;
-  }
+  const emptyPages = pagesText.filter((text) => !text.trim()).length;
+  setProgress(1);
 
-  return { pagesText, ocrPagesUsed, numPages };
+  return { pagesText, ocrPagesUsed: ocrPageNumbers.length, numPages, emptyPages, ocrPageNumbers };
 }
 
 // ----------------------------------------------------------------- flow
 
 els.processBtn.addEventListener("click", async () => {
-  if (!selectedFile || !currentPdf) return;
+  if (!selectedFile) {
+    alert("Escolha um arquivo PDF antes de processar.");
+    return;
+  }
+  if (!currentPdf) {
+    alert(
+      "Este PDF não pôde ser aberto (pode estar protegido por senha, corrompido ou incompleto). " +
+        "Escolha o arquivo de novo ou remova a proteção antes de converter."
+    );
+    return;
+  }
   els.processBtn.disabled = true;
   els.progressSection.hidden = false;
   els.previewSection.hidden = true;
@@ -359,11 +535,12 @@ els.processBtn.addEventListener("click", async () => {
   const aiHelpers = aiMode !== "none" ? AiReviewer : null;
 
   try {
-    const { pagesText, ocrPagesUsed, numPages } = await extractPdfText(
+    const { pagesText, ocrPagesUsed, numPages, emptyPages } = await extractPdfText(
       currentPdf,
       {
         ocrEnabled: els.ocrToggle.checked,
         aiApplyOcr: aiMode !== "none" && els.aiApplyOcr.checked,
+        aiApplyAll: aiMode !== "none" && els.aiApplyAll.checked,
         aiConfig,
       },
       aiHelpers
@@ -374,29 +551,32 @@ els.processBtn.addEventListener("click", async () => {
         ? `Concluído: ${numPages} páginas, ${ocrPagesUsed} via OCR.`
         : `Concluído: ${numPages} páginas extraídas como texto.`
     );
+    if (emptyPages > 0) log(`Atenção: ${emptyPages} de ${numPages} página(s) ficaram sem nenhum texto.`);
+
+    if (pagesText.every((text) => !text.trim())) {
+      const motivo = els.ocrToggle.checked
+        ? "Nem a extração de texto nem o OCR encontraram conteúdo neste PDF."
+        : "Este PDF não tem texto selecionável e o OCR está desligado.";
+      log(`${motivo} Nenhum EPUB foi gerado.`);
+      alert(
+        `${motivo}\n\n` +
+          (els.ocrToggle.checked
+            ? "Verifique se o PDF tem mesmo conteúdo legível (pode ser um scan de péssima qualidade ou páginas em branco)."
+            : 'Marque a opção "Usar OCR em páginas escaneadas" e tente de novo.')
+      );
+      return;
+    }
+
     log("Limpando quebras de linha e detectando parágrafos/capítulos…");
 
     const chapters = TextCleaner.splitIntoChapters(pagesText, {
       detectChapters: els.detectChapters.checked,
     });
 
-    if (aiMode !== "none" && els.aiApplyAll.checked && aiHelpers) {
-      for (let i = 0; i < chapters.length; i++) {
-        log(`Revisando capítulo ${i + 1}/${chapters.length} com IA…`);
-        const joined = chapters[i].paragraphs.join("\n\n");
-        try {
-          const reviewed = await aiHelpers.reviewText(joined, "chapter", aiConfig, setAiStatus);
-          const paragraphs = reviewed
-            .split(/\n{2,}/)
-            .map((p) => TextCleaner.normalizeSpacing(p.replace(/\n/g, " ")))
-            .filter(Boolean);
-          if (paragraphs.length) chapters[i].paragraphs = paragraphs;
-        } catch (err) {
-          log(`Capítulo ${i + 1}: revisão por IA falhou (${err.message}).`);
-        } finally {
-          setAiStatus("");
-        }
-      }
+    if (chapters.every((c) => c.paragraphs.length === 0)) {
+      log("Depois da limpeza não sobrou nenhum parágrafo. Nenhum EPUB foi gerado.");
+      alert("Depois da limpeza automática não sobrou texto nenhum — nenhum EPUB foi gerado.");
+      return;
     }
 
     log(`Pronto! ${chapters.length} capítulo(s) identificado(s). Revise abaixo antes de gerar o EPUB.`);
@@ -405,9 +585,18 @@ els.processBtn.addEventListener("click", async () => {
     els.previewSection.scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (err) {
     console.error(err);
-    log(`Erro: ${err.message}`);
-    alert("Não foi possível processar o PDF: " + err.message);
+    if (err instanceof OcrEngineError) {
+      const msg =
+        "O motor de OCR não pôde ser carregado — verifique os arquivos em js/vendor " +
+        `(tesseract.min.js, worker.min.js, tesseract-core-simd-lstm.js/.wasm) e em tessdata/ (por.traineddata.gz). Detalhe: ${err.message}`;
+      log(msg);
+      alert(msg);
+    } else {
+      log(`Erro: ${err.message}`);
+      alert("Não foi possível processar o PDF: " + err.message);
+    }
   } finally {
+    await terminateOcrPool();
     els.processBtn.disabled = false;
     setAiStatus("");
   }

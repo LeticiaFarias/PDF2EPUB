@@ -27,10 +27,36 @@ Regras obrigatórias:
     return settings.provider === "local" ? 900 : 3500;
   }
 
+  // Um parágrafo maior que o limite de um bloco é quebrado em pedaços
+  // menores, preferindo o fim de frase mais próximo do limite.
+  function splitLongParagraph(paragraph, maxChars) {
+    const pieces = [];
+    let rest = paragraph;
+
+    while (rest.length > maxChars) {
+      const window = rest.slice(0, maxChars);
+      let cut = -1;
+      for (const match of window.matchAll(/[.!?…]["'”’»)\]]*\s+/g)) {
+        cut = match.index + match[0].length;
+      }
+      if (cut <= maxChars * 0.4) {
+        const lastSpace = window.lastIndexOf(" ");
+        cut = lastSpace > maxChars * 0.4 ? lastSpace + 1 : maxChars;
+      }
+      pieces.push(rest.slice(0, cut).trim());
+      rest = rest.slice(cut);
+    }
+    if (rest.trim()) pieces.push(rest.trim());
+    return pieces;
+  }
+
   // Quebra o texto em blocos respeitando limites de parágrafo (nunca
-  // corta um parágrafo ao meio entre um bloco e outro).
+  // corta um parágrafo ao meio entre um bloco e outro, exceto quando o
+  // próprio parágrafo é maior que o limite).
   function chunkByParagraph(text, maxChars) {
-    const paragraphs = text.split(/\n{2,}/);
+    const paragraphs = text
+      .split(/\n{2,}/)
+      .flatMap((p) => (p.length + 2 > maxChars ? splitLongParagraph(p, maxChars) : [p]));
     const chunks = [];
     let current = [];
     let currentLen = 0;
@@ -58,7 +84,8 @@ Regras obrigatórias:
       settings.apiKey,
       settings.model,
       systemPrompt,
-      text
+      text,
+      onProgress
     );
   }
 
@@ -86,26 +113,6 @@ Regras obrigatórias:
   }
 
   /**
-   * Revisa a lista completa de capítulos (parágrafo a parágrafo, em
-   * blocos), preservando a estrutura de parágrafos de cada capítulo.
-   */
-  async function reviewChapters(settings, chapters, onProgress) {
-    const result = [];
-    for (let i = 0; i < chapters.length; i++) {
-      const chapter = chapters[i];
-      onProgress?.(`Revisando com IA: capítulo ${i + 1}/${chapters.length}…`);
-      const joined = chapter.paragraphs.join("\n\n");
-      const reviewed = await reviewRawText(settings, joined, { isOcr: false, onProgress });
-      const paragraphs = reviewed
-        .split(/\n{2,}/)
-        .map((p) => p.replace(/\n/g, " ").trim())
-        .filter(Boolean);
-      result.push({ title: chapter.title, paragraphs: paragraphs.length ? paragraphs : chapter.paragraphs });
-    }
-    return result;
-  }
-
-  /**
    * Wrapper de conveniência usado pela UI: revisa um texto "solto"
    * (página OCR ou capítulo inteiro já unido) sem precisar montar o
    * objeto de opções {isOcr} na mão.
@@ -115,5 +122,5 @@ Regras obrigatórias:
     return reviewRawText(settings, text, { isOcr: kind === "ocr", onProgress });
   }
 
-  return { reviewRawText, reviewChapters, reviewText };
+  return { reviewRawText, reviewText };
 })();

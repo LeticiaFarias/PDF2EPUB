@@ -15,8 +15,14 @@
  */
 
 const EpubBuilder = (() => {
+  // Caracteres de controle proibidos em XML 1.0 (tudo abaixo de 0x20
+  // exceto tab, LF e CR). O texto de OCR costuma trazer alguns e eles
+  // corrompem o EPUB inteiro.
+  const ILLEGAL_XML_CHARS = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g;
+
   function escapeXml(str) {
     return String(str)
+      .replace(ILLEGAL_XML_CHARS, "")
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;")
